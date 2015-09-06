@@ -1,0 +1,30 @@
+e1:
+  q1:
+    description: EmptyStr impl
+    t1:
+      description: singleton?
+      max: 1
+    t2:
+      description: funktioniert
+      max: 1
+e6:
+  q1:
+    description: static
+    t1:
+      description: checkbox
+      max: 1
+    t2:
+      description: erklärung
+      max: 2
+  q2:
+    description: unterklassen private sinnvoll?
+    t1:
+      description: checkbox
+      max: 1
+    t2:
+      description: erklarung
+      max: 2
+
+
+
+
