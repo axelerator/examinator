@@ -2,7 +2,9 @@ require 'csv'
 require 'yaml'
 require 'byebug'
 require 'readline'
-
+require 'terminal-table'
+require 'terminal-table/import'
+require 'colorize'
 
 Exam = Struct.new(:exercises) do
   attr_reader :results
@@ -20,6 +22,10 @@ Exam = Struct.new(:exercises) do
     @results ||= []
     @results << er
     er
+  end
+
+  def questions
+    exercises.values.map(&:questions).flatten
   end
 
   def tasks
@@ -67,6 +73,60 @@ Exam = Struct.new(:exercises) do
       end
     end
   end
+
+  def print_table
+    exercise_row = exercises.values.map do |exercise|
+      {value: exercise.id, colspan: exercise.tasks.length, :alignment => :center, :border_x => "="}
+    end
+    questions_row = exercises.values.map do |exercise|
+      exercise.questions.values.map do |question|
+        {value: question.id, colspan: question.tasks.length, :alignment => :center}
+      end
+    end.flatten
+    task_name_row = exercises.values.map do |exercise|
+      exercise.questions.values.map do |question|
+        question.tasks.values.map do |task|
+          {value: task.id, :alignment => :center}
+        end
+      end.flatten
+    end.flatten
+
+    task_value_row = exercises.values.map do |exercise|
+      exercise.questions.values.map do |question|
+        question.tasks.values.map do |task|
+          {value: task.max.to_s.colorize(:light_yellow), :alignment => :center}
+        end
+      end.flatten
+    end.flatten
+
+    student_rows = @results.map do |exam_result|
+      student_row = [exam_result.student_id]
+      student_row += exercises.values.map do |exercise|
+        exercise.questions.values.map do |question|
+          question.tasks.values.map do |task|
+            task_result = exam_result.result_for(task)
+            {value: task_result.task.global_id}
+          end
+        end.flatten
+      end.flatten
+      student_row
+    end
+
+    exercise_table = table do |t|
+      t << [''] + exercise_row
+      t.add_separator
+      t << [''] + questions_row
+      t.add_separator
+      t << [''] + task_name_row
+      t << [''] + task_value_row
+      t.add_separator
+      student_rows.each do |student_row|
+        t << student_row
+      end
+    end
+    puts exercise_table
+  end
+
 end
 
 Exercise = Struct.new(:id, :questions, :weight) do
@@ -92,6 +152,7 @@ Exercise = Struct.new(:id, :questions, :weight) do
   def read
     questions.values.map(&:read).flatten
   end
+
 end
 
 Question = Struct.new(:id, :tasks) do
@@ -184,6 +245,12 @@ ExamResult = Struct.new(:student_id, :task_results) do
       sum << results_hash[column_id]
     end
   end
+
+  def result_for(task)
+    task_results.find do |task_result|
+      task_result.task.global_id == task.global_id
+    end
+  end
 end
 TaskResult = Struct.new(:task, :points) do
   def to_pair
@@ -230,7 +297,7 @@ class Examinator
   end
 
   def results
-    puts "results"
+    @exam.print_table
   end
 
   def quit
