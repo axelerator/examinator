@@ -3,6 +3,7 @@ require 'yaml'
 require 'byebug'
 require 'readline'
 
+
 Exam = Struct.new(:exercises) do
   attr_reader :results
   def self.load(hash)
@@ -13,9 +14,7 @@ Exam = Struct.new(:exercises) do
     new(exercises)
   end
 
-  def read
-    student_id = Readline::readline("Student:")
-    return nil if %w{q quit bye exit}.include? student_id
+  def read(student_id)
     er = ExamResult.new(student_id, exercises.values.map(&:read).flatten)
     er.exam = self
     @results ||= []
@@ -70,12 +69,17 @@ Exam = Struct.new(:exercises) do
   end
 end
 
-Exercise = Struct.new(:id, :questions) do
+Exercise = Struct.new(:id, :questions, :weight) do
+  EXCERCISE_OPTIONS = [ { name: 'weight', default: 1 } ]
   def self.load(question_id, hash)
-    questions = {}
-    hash.each do |id, questions_hash|
-      questions[id] = Question.load(id, questions_hash)
+    EXCERCISE_OPTIONS.each do |option|
+      instance_variable_set("@#{option[:name]}", hash[option[:name].to_s] || option[:default])
     end
+    questions = {}
+    hash.reject{|k, _| EXCERCISE_OPTIONS.map{|o| o[:name].to_s}.include?(k) }
+      .each do |id, questions_hash|
+        questions[id] = Question.load(id, questions_hash)
+      end
     e = new(question_id, questions)
     questions.values.each{|q| q.exercise = e}
     e
@@ -90,18 +94,26 @@ Exercise = Struct.new(:id, :questions) do
   end
 end
 
-Question = Struct.new(:id, :description, :tasks) do
+Question = Struct.new(:id, :tasks) do
   attr_accessor :exercise
+  QUESTION_OPTIONS = [
+    { name: 'weight', default: 1 },
+    { name: 'description', default: 'Frage ohne Beschreibung' }
+  ]
+  attr_accessor *(QUESTION_OPTIONS.map{|o| o[:name]})
+
   def self.load(id, hash)
-    description = hash['description']
     tasks = {}
-    hash.reject{|k, _| k == 'description'}
+    hash.reject{|k, _| QUESTION_OPTIONS.map{|o| o[:name].to_s}.include?(k) }
     .each do |task_id, task_hash|
       tasks[task_id] = Task.load(task_id, task_hash)
     end
 
-    q = Question.new(id, description, tasks)
+    q = Question.new(id, tasks)
     tasks.values.each{|t| t.question = q}
+    QUESTION_OPTIONS.each do |option|
+      q.instance_variable_set("@#{option[:name]}", hash[option[:name].to_s] || option[:default])
+    end
     q
   end
 
@@ -111,16 +123,40 @@ Question = Struct.new(:id, :description, :tasks) do
   end
 end
 
-Task = Struct.new(:id, :description, :max) do
+class StudentCancelledException < RuntimeError; end
+class OverMaxPointsException < RuntimeError; end
+
+Task = Struct.new(:id, :max) do
   attr_accessor :question
+  TASK_OPTIONS = [
+    { name: 'weight', default: 1 },
+    { name: 'max', default: 1 },
+    { name: 'description', default: 'Task ohne Beschreibung' }
+  ]
+  attr_accessor *(TASK_OPTIONS.map{|o| o[:name]})
   def self.load(id, hash)
-    new(id, hash['description'], hash['max'])
+    new_task = new(id)
+    TASK_OPTIONS.each do |option|
+      new_task.instance_variable_set("@#{option[:name]}", hash[option[:name].to_s] || option[:default])
+    end
+    new_task
   end
 
   def read
     print "#{description}(#{max})"
-    line = Readline::readline("> ")
-    TaskResult.new(self, line.to_i)
+    begin
+      line = Readline::readline("> ")
+      raise StudentCancelledException.new if line == 'q'
+      integer = Integer(line)
+      raise OverMaxPointsException.new("Maximal #{max} Punkte bei dieser Aufgabe") if integer > max
+      TaskResult.new(self, integer)
+    rescue ArgumentError => e
+      puts "Zahl zwischen 0 und #{max}!"
+      read
+    rescue OverMaxPointsException => e
+      puts e.message
+      read
+    end
   end
 
   def global_id
@@ -153,7 +189,62 @@ TaskResult = Struct.new(:task, :points) do
   def to_pair
     [task.global_id, points]
   end
+
+  def weighted_points
+    task.question.max_points
+  end
 end
+
+class Examinator
+  CMDS = [
+    {key: 'r', descr: 'Klausurergebnisse', method: :results},
+    {key: 'q', descr: 'Beenden', method: :quit },
+    {key: 'h', descr: 'Hilfe', method: :printhelp}
+  ]
+
+  def initialize(exam_def_file, results_file)
+    examHash = YAML.load_file(exam_def_file)
+    @exam = Exam.load(examHash)
+    @exam.read_results(results_file)
+    @result_filename = results_file
+  end
+
+  def run
+    @running = true
+    while @running do
+      begin
+        input = Readline::readline("Student (oder Kommando):").strip
+        cmd = CMDS.find{|c| c[:key] == input}
+        if cmd.nil?
+          student_id = input
+          @exam.read(student_id)
+        else
+          send(cmd[:method])
+        end
+      rescue StudentCancelledException
+        puts "Aktueller Student verworfen"
+      end
+    end
+    @exam.write(@result_filename)
+
+  end
+
+  def results
+    puts "results"
+  end
+
+  def quit
+    @running = false
+  end
+
+  def printhelp
+    CMDS.each do |cmd|
+      puts "#{cmd[:key]} \t - \t #{cmd[:descr]}"
+    end
+  end
+
+end
+
 
 exam_def_file, results_file = ARGV
 exam_def_file ||= ''
@@ -161,11 +252,6 @@ results_file ||= ''
 unless exam_def_file.end_with?('.yml') && results_file.end_with?('.csv')
   puts "USAGE: exam EXAM-DEF-YAML RESULTS-CSV"
 else
-  examHash = YAML.load_file(exam_def_file)
-  exam = Exam.load(examHash)
-  exam.read_results(results_file)
-  while exam.read do
-  end
-  exam.write(results_file)
+  Examinator.new(exam_def_file, results_file).run
 end
 
