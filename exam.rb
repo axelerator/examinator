@@ -6,14 +6,26 @@ require 'terminal-table'
 require 'terminal-table/import'
 require 'colorize'
 
-Exam = Struct.new(:exercises) do
-  attr_reader :results
+class Exam
+  attr_reader :results, :exercises
+  def initialize(exercises)
+    @exercises = exercises
+    @view_options = {
+      per_task: :points
+    }
+  end
+
   def self.load(hash)
     exercises = {}
     hash.each do |exercise_id, questions_hash|
       exercises[exercise_id] = Exercise.load(exercise_id, questions_hash)
     end
-    new(exercises)
+    exam = new(exercises)
+    exercises.values.each do |exercise|
+      exercise.exam = exam
+    end
+    exam
+
   end
 
   def read(student_id)
@@ -22,6 +34,14 @@ Exam = Struct.new(:exercises) do
     @results ||= []
     @results << er
     er
+  end
+
+  def toggle_display
+    @view_options[:per_task] = {
+      points: :percent,
+      percent: :weighted,
+      weighted: :points
+    }[@view_options[:per_task]]
   end
 
   def questions
@@ -56,7 +76,7 @@ Exam = Struct.new(:exercises) do
         student_id, *points = row
         task_results = []
         points.each_with_index do |point, index|
-          task_results << TaskResult.new(column_mapping[index], point)
+          task_results << TaskResult.new(column_mapping[index], point.to_i)
         end
         er = ExamResult.new(student_id, task_results)
         er.exam = self
@@ -76,20 +96,42 @@ Exam = Struct.new(:exercises) do
 
   def print_table
     exercise_row = exercises.values.map do |exercise|
-      {value: exercise.id, colspan: exercise.tasks.length, :alignment => :center, :border_x => "="}
+      value = exercise.local_id + "(#{exercise.weight})".colorize(:light_black) + "(#{'%.1f' % exercise.weighted_points_total})".colorize(:light_blue)
+      {value: value, colspan: exercise.tasks.length, :alignment => :center, :border_x => "="}
     end
     questions_row = exercises.values.map do |exercise|
       exercise.questions.values.map do |question|
-        {value: question.id, colspan: question.tasks.length, :alignment => :center}
+        value = question.local_id + "(#{question.weight})".colorize(:light_black)  + "(#{'%.1f' % question.weighted_points_total})".colorize(:light_blue)
+        {value: value, colspan: question.tasks.length, :alignment => :center}
       end
     end.flatten
     task_name_row = exercises.values.map do |exercise|
       exercise.questions.values.map do |question|
         question.tasks.values.map do |task|
-          {value: task.id, :alignment => :center}
+          {value: task.local_id, :alignment => :center}
         end
       end.flatten
     end.flatten
+    task_name_row += ['Σ', '%', '♫']
+
+    task_weight_row = exercises.values.map do |exercise|
+      exercise.questions.values.map do |question|
+        question.tasks.values.map do |task|
+          value = "(#{task.weight})".colorize(:light_black)
+          {value: value, :alignment => :center}
+        end
+      end.flatten
+    end.flatten
+
+    task_weighted_total_points = exercises.values.map do |exercise|
+      exercise.questions.values.map do |question|
+        question.tasks.values.map do |task|
+          value = ('%.1f' % task.weighted_points_total).colorize(:light_blue)
+          {value: value, :alignment => :center}
+        end
+      end.flatten
+    end.flatten
+
 
     task_value_row = exercises.values.map do |exercise|
       exercise.questions.values.map do |question|
@@ -98,20 +140,22 @@ Exam = Struct.new(:exercises) do
         end
       end.flatten
     end.flatten
+    task_value_row << points_total
 
-    student_rows = @results.map do |exam_result|
-      student_row = [exam_result.student_id]
-      student_row += exercises.values.map do |exercise|
-        exercise.questions.values.map do |question|
-          question.tasks.values.map do |task|
-            task_result = exam_result.result_for(task)
-            {value: task_result.task.global_id}
-          end
-        end.flatten
-      end.flatten
-      student_row
+    student_points = per_student_task_result do |task_result|
+      {value: task_result.points}
+    end
+    student_percentages = per_student_task_result do |task_result|
+      {value: task_result.percent}
     end
 
+    student_weighted_points = per_student_task_result do |task_result|
+      {value: ( '%.1f' % task_result.weighted_points).colorize(:light_blue)}
+    end
+
+    student_rows = student_points if @view_options[:per_task] == :points
+    student_rows = student_percentages if @view_options[:per_task] == :percent
+    student_rows = student_weighted_points if @view_options[:per_task] == :weighted
     exercise_table = table do |t|
       t << [''] + exercise_row
       t.add_separator
@@ -119,6 +163,8 @@ Exam = Struct.new(:exercises) do
       t.add_separator
       t << [''] + task_name_row
       t << [''] + task_value_row
+      t << [''] + task_weight_row
+      t << [''] + task_weighted_total_points
       t.add_separator
       student_rows.each do |student_row|
         t << student_row
@@ -127,14 +173,68 @@ Exam = Struct.new(:exercises) do
     puts exercise_table
   end
 
+  def per_student_task_result(&blk)
+    student_rows = @results.map do |exam_result|
+      student_row = [exam_result.student_id]
+      student_row += exercises.values.map do |exercise|
+        exercise.questions.values.map do |question|
+          question.tasks.values.map do |task|
+            task_result = exam_result.result_for(task)
+
+            blk.call(task_result)
+          end
+        end.flatten
+      end.flatten
+      student_row << exam_result.points_total
+      student_row << ("%.1f" %  exam_result.percent)
+      student_row << exam_result.grade
+    end
+    student_rows
+  end
+
+  def score
+    grades_table = table do |t|
+      t << GRADES.map
+
+      by_grade = @results.group_by(&:grade)
+      t << GRADES.map do |grade|
+        if by_grade[grade]
+          by_grade[grade].length
+        else
+          0
+        end
+      end
+      t << GRADES.map do |grade|
+        if by_grade[grade]
+          percent = (by_grade[grade].length / @results.length)* 100
+          '%.2f' % percent
+        else
+          '0.00'
+        end
+      end
+
+    end
+    puts grades_table
+  end
+
+  def weighted_points_total
+    100
+  end
+
+  def points_total
+    tasks.map(&:max).inject(:+)
+  end
+
 end
 
-Exercise = Struct.new(:id, :questions, :weight) do
-  EXCERCISE_OPTIONS = [ { name: 'weight', default: 1 } ]
+Exercise = Struct.new(:local_id, :questions) do
+  EXCERCISE_OPTIONS = [
+    { name: 'weight', default: 1 },
+    { name: 'description', default: 'Frage ohne Beschreibung' }
+  ]
+  attr_accessor *(EXCERCISE_OPTIONS.map{|o| o[:name]})
+  attr_accessor :exam
   def self.load(question_id, hash)
-    EXCERCISE_OPTIONS.each do |option|
-      instance_variable_set("@#{option[:name]}", hash[option[:name].to_s] || option[:default])
-    end
     questions = {}
     hash.reject{|k, _| EXCERCISE_OPTIONS.map{|o| o[:name].to_s}.include?(k) }
       .each do |id, questions_hash|
@@ -142,6 +242,9 @@ Exercise = Struct.new(:id, :questions, :weight) do
       end
     e = new(question_id, questions)
     questions.values.each{|q| q.exercise = e}
+    EXCERCISE_OPTIONS.each do |option|
+      e.instance_variable_set("@#{option[:name]}", hash[option[:name].to_s] || option[:default])
+    end
     e
   end
 
@@ -153,9 +256,14 @@ Exercise = Struct.new(:id, :questions, :weight) do
     questions.values.map(&:read).flatten
   end
 
+  def weighted_points_total
+    exam_weights_sum = exam.exercises.values.map(&:weight).inject(:+)
+    exam.weighted_points_total* (self.weight.to_f / exam_weights_sum)
+  end
+
 end
 
-Question = Struct.new(:id, :tasks) do
+Question = Struct.new(:local_id, :tasks) do
   attr_accessor :exercise
   QUESTION_OPTIONS = [
     { name: 'weight', default: 1 },
@@ -182,12 +290,17 @@ Question = Struct.new(:id, :tasks) do
     puts " ---- #{description} ---- "
     tasks.values.map(&:read)
   end
+
+  def weighted_points_total
+    question_weights_sum = exercise.questions.values.map(&:weight).inject(:+)
+    exercise.weighted_points_total * (self.weight.to_f / question_weights_sum)
+  end
 end
 
 class StudentCancelledException < RuntimeError; end
 class OverMaxPointsException < RuntimeError; end
 
-Task = Struct.new(:id, :max) do
+Task = Struct.new(:local_id, :max) do
   attr_accessor :question
   TASK_OPTIONS = [
     { name: 'weight', default: 1 },
@@ -221,8 +334,14 @@ Task = Struct.new(:id, :max) do
   end
 
   def global_id
-    [question.exercise.id, question.id, id].join('-')
+    [question.exercise.local_id, question.local_id, local_id].join('-')
   end
+
+  def weighted_points_total
+    task_weights_sum = question.tasks.values.map(&:weight).inject(:+)
+    question.weighted_points_total * (self.weight.to_f / task_weights_sum)
+  end
+
 end
 
 ExamResult = Struct.new(:student_id, :task_results) do
@@ -251,6 +370,44 @@ ExamResult = Struct.new(:student_id, :task_results) do
       task_result.task.global_id == task.global_id
     end
   end
+
+  def weighted_points
+    task_results.map(&:weighted_points).inject(:+)
+  end
+
+  def points_total
+    task_results.map(&:points).inject(:+)
+  end
+
+  def percent
+    (points_total.to_f / exam.points_total) * 100
+  end
+
+  def weighted_percent
+    (weighted_points.to_f / exam.weighted_points_total) * 100
+  end
+
+  Grade = Struct.new(:percent, :color, :name) do
+    def to_s
+      name.colorize(color)
+    end
+  end
+  GRADES = [
+    Grade.new(92, :green, '1'),
+    Grade.new(82, :green, '2'),
+    Grade.new(67, :yellow, '3'),
+    Grade.new(50, :yellow, '4'),
+    Grade.new(30, :red, '5'),
+    Grade.new(0, :red, '6')
+  ]
+  def grade
+    p = weighted_percent
+    g = GRADES.find do |grade|
+      p >= grade.percent
+    end
+    return g
+  end
+
 end
 TaskResult = Struct.new(:task, :points) do
   def to_pair
@@ -258,15 +415,22 @@ TaskResult = Struct.new(:task, :points) do
   end
 
   def weighted_points
-    task.question.max_points
+    (points.to_f / task.max) *task.weighted_points_total
+  end
+
+  def percent
+    (points.to_f / task.max) * 100
   end
 end
 
+
 class Examinator
   CMDS = [
-    {key: 'r', descr: 'Klausurergebnisse', method: :results},
-    {key: 'q', descr: 'Beenden', method: :quit },
-    {key: 'h', descr: 'Hilfe', method: :printhelp}
+    {key: 'a', descr: 'Ansicht wechseln', method: :toggle_display},
+    {key: 'l', descr: 'ErgenisListe', method: :results},
+    {key: 's', descr: 'NotenSpiegel', method: :score},
+    {key: 'h', descr: 'Hilfe', method: :printhelp},
+    {key: 'q', descr: 'Beenden', method: :quit }
   ]
 
   def initialize(exam_def_file, results_file)
@@ -300,6 +464,10 @@ class Examinator
     @exam.print_table
   end
 
+  def score
+    @exam.score
+  end
+
   def quit
     @running = false
   end
@@ -308,6 +476,11 @@ class Examinator
     CMDS.each do |cmd|
       puts "#{cmd[:key]} \t - \t #{cmd[:descr]}"
     end
+  end
+
+  def toggle_display
+    @exam.toggle_display
+    results
   end
 
 end

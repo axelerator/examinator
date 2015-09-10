@@ -1,5 +1,5 @@
 e1:
-  weight: 1
+  weight: 2
   q1:
     description: EmptyStr impl
     t1:
@@ -10,6 +10,7 @@ e1:
       max: 1
 e6:
   q1:
+    weight: 3
     description: static
     t1:
       description: checkbox
